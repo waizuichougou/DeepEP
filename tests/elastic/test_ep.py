@@ -82,6 +82,7 @@ def test_dispatch_combine(buffer: deep_ep.ElasticBuffer, args: argparse.Namespac
 
     # Run all tests
     dist_print('Running all test cases:', once_in_node=True)
+    padding_poisoned = False
     for (do_handle_copy, expert_alignment, use_fp8_dispatch, num_bias,
          with_previous_event, async_with_compute_stream, allocate_on_comm_stream) in enumerate_ep_modes():
         dist_print(f' > Testing with '
@@ -141,6 +142,14 @@ def test_dispatch_combine(buffer: deep_ep.ElasticBuffer, args: argparse.Namespac
             torch.cuda.synchronize()
 
         # Do dispatch
+        if not args.skip_check and not args.do_cpu_sync and not padding_poisoned:
+            # Make stale allocator contents observable in the worst-case output suffix.
+            stale_recv_topk_idx = [torch.zeros(
+                (num_max_tokens_per_rank * buffer.num_ranks, num_topk),
+                dtype=topk_idx.dtype, device='cuda') for _ in range(2)]
+            torch.cuda.synchronize()
+            del stale_recv_topk_idx
+            padding_poisoned = True
         dispatch_args = dict(
             x=x, topk_idx=topk_idx, topk_weights=topk_weights,
             num_sms=num_sms, num_qps=num_qps,
@@ -181,6 +190,12 @@ def test_dispatch_combine(buffer: deep_ep.ElasticBuffer, args: argparse.Namespac
         assert num_recv_tokens == expanded_handle.psum_num_recv_tokens_per_scaleup_rank[-1].item(), \
                'Expand should not affect the number of received tokens.'
         num_expanded_tokens = expanded_handle.psum_num_recv_tokens_per_expert[-1].item()
+
+        if not args.skip_check and not args.do_cpu_sync:
+            assert (recv_topk_idx[num_recv_tokens:] == -1).all(), \
+                'Non-expand dispatch must invalidate worst-case output padding.'
+            assert (cached_recv_topk_idx[num_recv_tokens:] == -1).all(), \
+                'Cached non-expand dispatch must invalidate worst-case output padding.'
 
         # Construction the input data for DeepEP combine
         src_token_global_idx = handle.recv_src_metadata[:num_recv_tokens, 0]

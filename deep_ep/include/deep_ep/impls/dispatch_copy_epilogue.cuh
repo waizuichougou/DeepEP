@@ -59,8 +59,11 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
     // NOTES: PDL is used, please do not use `__ldg`
     cudaGridDependencySynchronize();
 
-    // For no CPU sync case, the number of received tokens should be read from the GPU tensor
-    if (num_recv_tokens == kNumMaxTokensPerRank * kNumRanks)
+    // For no CPU sync case, the number of received tokens should be read from the GPU tensor.
+    // Keep this flag so that the output capacity can be distinguished from the actual count
+    // after `num_recv_tokens` is overwritten below.
+    const bool has_worst_case_output = num_recv_tokens == kNumMaxTokensPerRank * kNumRanks;
+    if (has_worst_case_output)
         num_recv_tokens = psum_num_recv_tokens_per_scaleup_rank[kNumScaleupRanks - 1];
 
     // Current rank indices should be maintained
@@ -204,6 +207,21 @@ dispatch_copy_epilogue_impl(void* buffer, void* workspace,
             if (kDoExpand and lane_idx < kNumTopk)
                 recv_src_metadata[i * kMetadataStride + 2 + lane_idx] = dst_tensor_idx;
             __syncwarp();
+        }
+    }
+
+    // Non-expand/no-CPU-sync dispatch allocates output tensors for the worst case, while the
+    // copy loop above only writes the received prefix.  A stale top-k index in the unwritten
+    // suffix can be interpreted as a real expert by consumers that process the whole capture
+    // buffer.  Mark the suffix as invalid without adding another kernel launch.
+    if constexpr (not kDoExpand) {
+        if (has_worst_case_output) {
+            for (int i = num_recv_tokens + global_warp_idx;
+                 i < kNumMaxTokensPerRank * kNumRanks;
+                 i += kNumWarps * kNumSMs) {
+                if (lane_idx < kNumTopk)
+                    recv_topk_idx[i * kNumTopk + lane_idx] = static_cast<topk_idx_t>(-1);
+            }
         }
     }
 
