@@ -143,7 +143,8 @@ def test_dispatch_combine(buffer: deep_ep.ElasticBuffer, args: argparse.Namespac
 
         # Do dispatch
         if not args.skip_check and not args.do_cpu_sync and not padding_poisoned:
-            # Make stale allocator contents observable in the worst-case output suffix.
+            # Poison the normal and cached recv_topk_idx allocations. Zero is a valid local
+            # expert ID, so stale allocator contents remain observable in the output suffix.
             stale_recv_topk_idx = [torch.zeros(
                 (num_max_tokens_per_rank * buffer.num_ranks, num_topk),
                 dtype=topk_idx.dtype, device='cuda') for _ in range(2)]
